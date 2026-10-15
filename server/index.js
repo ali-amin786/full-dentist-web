@@ -4,14 +4,10 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import cookieParser from "cookie-parser";
-import { WebSocketServer } from "ws";
 import dotenv from "dotenv";
 import * as db from "./db.js";
 import * as cal from "./cal.js";
 import * as auth from "./auth.js";
-import { attachLiveSession } from "./gemini-live.js";
-import { MAYA_SYSTEM_PROMPT as defaultPromptText } from "./prompt.js";
-import { subscribe } from "./livebus.js";
 
 // The clinic's local runtime must prefer this project's ignored .env file over
 // inherited shell variables, otherwise an old admin session can reject its own credentials.
@@ -28,7 +24,7 @@ app.use(cookieParser());
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
-    clinic: process.env.CLINIC_NAME || "Westside Dentist",
+    clinic: process.env.CLINIC_NAME || "Ali Amin Dental",
     eventTypeId: Number(process.env.CAL_EVENT_TYPE_ID),
   });
 });
@@ -86,7 +82,7 @@ app.get("/api/calls/:id/recording", auth.requireAdmin, (req, res) => {
 
 app.get("/api/prompt", auth.requireAdmin, (_req, res) => {
   res.json({
-    prompt: db.getSetting("systemPrompt") || defaultPromptText,
+    prompt: db.getSetting("systemPrompt") || "(voice agent removed)",
     overridden: Boolean(db.getSetting("systemPrompt")),
   });
 });
@@ -129,15 +125,8 @@ function keyStatus(settingName, envName) {
 
 app.get("/api/keys", auth.requireAdmin, (_req, res) => {
   // Only ever expose whether a key is set + its last 4 chars, never the value.
-  res.json({ gemini: keyStatus("geminiApiKey", "GEMINI_API_KEY"), cal: keyStatus("calApiKey", "CAL_API_KEY") });
+  res.json({ cal: keyStatus("calApiKey", "CAL_API_KEY") });
 });
-
-async function validateGeminiKey(key) {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`
-  );
-  if (!res.ok) throw new Error(`Gemini rejected this key (HTTP ${res.status})`);
-}
 
 async function validateCalKey(key) {
   const res = await fetch("https://api.cal.com/v2/bookings?take=1", {
@@ -149,13 +138,8 @@ async function validateCalKey(key) {
 }
 
 app.put("/api/keys", auth.requireAdmin, async (req, res) => {
-  const { geminiApiKey, calApiKey } = req.body || {};
+  const { calApiKey } = req.body || {};
   try {
-    if (typeof geminiApiKey === "string") {
-      const trimmed = geminiApiKey.trim();
-      if (trimmed && trimmed !== "clear") await validateGeminiKey(trimmed);
-      db.setSetting("geminiApiKey", trimmed === "" ? null : trimmed || null);
-    }
     if (typeof calApiKey === "string") {
       const trimmed = calApiKey.trim();
       if (trimmed && trimmed !== "clear") await validateCalKey(trimmed);
@@ -163,7 +147,6 @@ app.put("/api/keys", auth.requireAdmin, async (req, res) => {
     }
     res.json({
       ok: true,
-      gemini: keyStatus("geminiApiKey", "GEMINI_API_KEY"),
       cal: keyStatus("calApiKey", "CAL_API_KEY"),
     });
   } catch (err) {
@@ -233,76 +216,8 @@ app.use(
 );
 
 const server = http.createServer(app);
-// Two WSS instances on one HTTP server must use noServer + explicit upgrade
-// routing: path-filtered servers each call handleUpgrade for EVERY upgrade
-// and abort mismatches with HTTP 400 — injected straight into the other
-// path's upgraded socket, which killed every live call.
-const wss = new WebSocketServer({ noServer: true });
-
-wss.on("connection", (socket, req) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const timezone = url.searchParams.get("timezone") || "Europe/London";
-  attachLiveSession(socket, { timezone }).catch((err) => {
-    try {
-      socket.send(JSON.stringify({ type: "error", message: err.message }));
-    } catch {
-      /* ignore */
-    }
-    socket.close();
-  });
-});
-
-// Admin live listening: bridges chunks published on the call bus to
-// authenticated admin browsers. cookieParser never runs on WebSocket
-// upgrades, so parse the upgrade Cookie header into the shape readSession
-// expects ({ cookies: { mola_admin: token } }).
-function upgradeCookies(header) {
-  const cookies = {};
-  if (!header) return cookies;
-  for (const part of header.split(";")) {
-    const idx = part.indexOf("=");
-    if (idx === -1) continue;
-    cookies[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
-  }
-  return cookies;
-}
-
-const monitorWss = new WebSocketServer({ noServer: true });
-
-monitorWss.on("connection", (socket, req) => {
-  const session = auth.readSession({ cookies: upgradeCookies(req.headers.cookie) });
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const callId = url.searchParams.get("callId");
-  if (!session || !callId) {
-    socket.close(4401, "Unauthorized");
-    return;
-  }
-  const unsubscribe = subscribe(callId, (chunk) => {
-    try {
-      if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(chunk));
-    } catch {
-      /* dead socket — ignore */
-    }
-  });
-  socket.on("close", unsubscribe);
-  // A socket that errors never emits close reliably; unsubscribing here keeps
-  // the bus from writing into it. Double-unsubscribe is harmless.
-  socket.on("error", unsubscribe);
-});
-
-server.on("upgrade", (req, socket, head) => {
-  const { pathname } = new URL(req.url, `http://${req.headers.host}`);
-  if (pathname === "/ws/live") {
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
-  } else if (pathname === "/ws/monitor") {
-    monitorWss.handleUpgrade(req, socket, head, (ws) => monitorWss.emit("connection", ws, req));
-  } else {
-    socket.destroy();
-  }
-});
 
 server.listen(PORT, () => {
-  console.log(`Westside Dentist running on http://127.0.0.1:${PORT}`);
+  console.log(`Ali Amin Dental running on http://127.0.0.1:${PORT}`);
   console.log(`Admin        http://127.0.0.1:${PORT}/admin`);
-  console.log(`Voice Maya   bottom-right booking orb on the public site`);
 });
